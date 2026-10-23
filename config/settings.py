@@ -14,27 +14,81 @@ from dotenv import load_dotenv
 # Base project directory
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load .env file from base directory if present; fall back to .env.example
+# Load local .env file only if it exists (never load placeholder .env.example into environment)
 if (BASE_DIR / ".env").exists():
     load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
-elif (BASE_DIR / ".env.example").exists():
-    load_dotenv(dotenv_path=BASE_DIR / ".env.example", override=False)
+
+KNOWN_PLACEHOLDERS = {
+    "your_api_key_here",
+    "your_google_api_key_here",
+    "your_gemini_api_key_here",
+    "placeholder",
+    "none",
+    "null",
+    "undefined",
+    "",
+}
+
+
+def clean_api_key(val: Optional[str]) -> str:
+    """Clean, unquote, and validate an API key string.
+
+    Strips whitespace, newlines, and surrounding quotes (' or ").
+    Returns an empty string if the key matches known dummy placeholders.
+    """
+    if val is None:
+        return ""
+    cleaned = str(val).strip().strip("'\"").strip()
+    if cleaned.lower() in KNOWN_PLACEHOLDERS:
+        return ""
+    return cleaned
 
 
 def _get_env_or_secret(key: str, default: str = "") -> str:
-    """Read configuration from Streamlit Cloud secrets or environment variables."""
+    """Read configuration with priority: Streamlit secrets -> os.environ -> default.
+
+    Supports:
+    - Direct key lookups in st.secrets (e.g. GEMINI_API_KEY, gemini_api_key)
+    - Common sections in st.secrets (e.g. st.secrets["gemini"]["api_key"])
+    - Direct lookups in os.environ
+    """
+    # 1. Check Streamlit Cloud Secrets first
     try:
         import streamlit as st
 
-        if hasattr(st, "secrets") and key in st.secrets:
-            val = st.secrets[key]
-            if val is not None:
-                return str(val).strip()
+        if hasattr(st, "secrets") and st.secrets is not None:
+            # Check candidate key name variations
+            for k in (key, key.upper(), key.lower()):
+                if k in st.secrets:
+                    val = st.secrets[k]
+                    if val is not None:
+                        s_val = clean_api_key(val) if "api_key" in key.lower() else str(val).strip().strip("'\"").strip()
+                        if s_val and s_val.lower() not in KNOWN_PLACEHOLDERS:
+                            return s_val
+
+            # Check nested sections: [general], [gemini], [google], [ai]
+            for sec in ("general", "gemini", "google", "ai"):
+                if sec in st.secrets:
+                    sec_data = st.secrets[sec]
+                    if isinstance(sec_data, dict):
+                        for k in (key, key.upper(), key.lower(), "api_key", "key"):
+                            if k in sec_data:
+                                val = sec_data[k]
+                                if val is not None:
+                                    s_val = clean_api_key(val) if "api_key" in key.lower() else str(val).strip().strip("'\"").strip()
+                                    if s_val and s_val.lower() not in KNOWN_PLACEHOLDERS:
+                                        return s_val
     except Exception:
         pass
-    val = os.getenv(key)
-    if val is not None:
-        return str(val).strip()
+
+    # 2. Check Environment Variables
+    for k in (key, key.upper(), key.lower()):
+        val = os.getenv(k)
+        if val is not None:
+            s_val = clean_api_key(val) if "api_key" in key.lower() else str(val).strip().strip("'\"").strip()
+            if s_val and s_val.lower() not in KNOWN_PLACEHOLDERS:
+                return s_val
+
     return default
 
 
@@ -56,9 +110,9 @@ class Settings:
         self.EXPORTS_DIR: Path = BASE_DIR / "exports"
 
         # AI Configuration
-        self.GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "").strip()
-        self.AI_ENABLED: bool = _str_to_bool(os.getenv("AI_ENABLED"), default=True)
-        self._ai_model: str = os.getenv("AI_MODEL", "gemini-3.1-flash-lite").strip()
+        self.GEMINI_API_KEY: str = _get_env_or_secret("GEMINI_API_KEY") or _get_env_or_secret("GOOGLE_API_KEY")
+        self.AI_ENABLED: bool = _str_to_bool(_get_env_or_secret("AI_ENABLED", "true"), default=True)
+        self._ai_model: str = _get_env_or_secret("AI_MODEL", "gemini-3.1-flash-lite").strip()
 
         # Database Configuration
         self.DATABASE_URL: str = os.getenv(
@@ -109,33 +163,45 @@ class Settings:
         self.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     def get_api_key(self) -> str:
-        """Get the current Gemini API key from environment (.env/.env.example) or database setting."""
-        # Check environment dynamically
-        env_key = os.getenv("GEMINI_API_KEY", "").strip() or self.GEMINI_API_KEY
-        if env_key and env_key.lower() not in ("your_api_key_here", "none", "placeholder"):
-            return env_key
+        """Get the current Gemini API key from Streamlit secrets, environment, or database."""
+        # 1. Check Streamlit Secrets & Environment dynamically
+        key = _get_env_or_secret("GEMINI_API_KEY")
+        if not key:
+            key = _get_env_or_secret("GOOGLE_API_KEY")
+        if key:
+            return key
 
-        # If not in env, reload .env or .env.example
-        if (self.BASE_DIR / ".env").exists():
-            load_dotenv(dotenv_path=self.BASE_DIR / ".env", override=True)
-        elif (self.BASE_DIR / ".env.example").exists():
-            load_dotenv(dotenv_path=self.BASE_DIR / ".env.example", override=True)
+        # 2. Check cached instance setting if valid
+        if hasattr(self, "GEMINI_API_KEY") and self.GEMINI_API_KEY:
+            cleaned = clean_api_key(self.GEMINI_API_KEY)
+            if cleaned:
+                return cleaned
 
-        env_key = os.getenv("GEMINI_API_KEY", "").strip()
-        if env_key and env_key.lower() not in ("your_api_key_here", "none", "placeholder"):
-            return env_key
-
-        # Check database setting
+        # 3. Check database setting (ApplicationSetting table)
         try:
             from database.connection import get_session
             from database.models import ApplicationSetting
             from sqlalchemy import select
+
             with get_session() as session:
-                val = session.scalar(select(ApplicationSetting.value).where(ApplicationSetting.key == "gemini_api_key"))
-                if val and val.strip() and val.strip().lower() not in ("your_api_key_here", "none", "placeholder"):
-                    return val.strip()
+                val = session.scalar(
+                    select(ApplicationSetting.value).where(ApplicationSetting.key == "gemini_api_key")
+                )
+                if val:
+                    cleaned = clean_api_key(val)
+                    if cleaned:
+                        return cleaned
         except Exception:
             pass
+
+        # 4. If running locally with .env file, reload .env
+        dotenv_file = self.BASE_DIR / ".env"
+        if dotenv_file.exists():
+            load_dotenv(dotenv_path=dotenv_file, override=True)
+            env_key = clean_api_key(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
+            if env_key:
+                return env_key
+
         return ""
 
     @property
@@ -148,32 +214,35 @@ class Settings:
         self._ai_model = (value or "").strip()
 
     def get_model(self) -> str:
-        """Get the current AI model from environment (.env/.env.example) or database setting.
+        """Get the current AI model from Streamlit secrets, environment, or database setting."""
+        # 1. Check Streamlit Secrets & Environment
+        model = _get_env_or_secret("AI_MODEL")
+        if model:
+            return model
 
-        Environment variables in .env take priority over database settings so changes
-        in .env are immediately respected.
-        """
-        # Dynamic reload of .env so hot edits take effect immediately
-        if (self.BASE_DIR / ".env").exists():
-            load_dotenv(dotenv_path=self.BASE_DIR / ".env", override=True)
-        elif (self.BASE_DIR / ".env.example").exists():
-            load_dotenv(dotenv_path=self.BASE_DIR / ".env.example", override=True)
-
-        env_model = os.getenv("AI_MODEL", "").strip().strip("'\"")
-        if env_model:
-            return env_model
-
-        # Fallback to database setting if not configured in environment
+        # 2. Check database setting
         try:
             from database.connection import get_session
             from database.models import ApplicationSetting
             from sqlalchemy import select
+
             with get_session() as session:
-                val = session.scalar(select(ApplicationSetting.value).where(ApplicationSetting.key == "ai_model"))
+                val = session.scalar(
+                    select(ApplicationSetting.value).where(ApplicationSetting.key == "ai_model")
+                )
                 if val and val.strip():
                     return val.strip()
         except Exception:
             pass
+
+        # 3. Reload local .env if present
+        dotenv_file = self.BASE_DIR / ".env"
+        if dotenv_file.exists():
+            load_dotenv(dotenv_path=dotenv_file, override=True)
+            env_model = os.getenv("AI_MODEL", "").strip().strip("'\"")
+            if env_model:
+                return env_model
+
         return getattr(self, "_ai_model", "") or "gemini-3.1-flash-lite"
 
     @property

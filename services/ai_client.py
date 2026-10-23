@@ -32,6 +32,14 @@ AVAILABLE_MODELS = [
 ]
 
 
+def reset_cached_client() -> None:
+    """Reset cached GenAI client to force re-initialization with new credentials."""
+    global _cached_client, _cached_api_key
+    with _client_lock:
+        _cached_client = None
+        _cached_api_key = None
+
+
 def get_genai_client(api_key: Optional[str] = None) -> Optional[Any]:
     """Get or create a cached, thread-safe Google GenAI client with optimized HTTP options.
 
@@ -49,7 +57,10 @@ def get_genai_client(api_key: Optional[str] = None) -> Optional[Any]:
         from config.settings import get_settings
         api_key = get_settings().get_api_key()
 
-    if not api_key or api_key.lower() in ("your_api_key_here", "none", "placeholder"):
+    from config.settings import clean_api_key
+    api_key = clean_api_key(api_key)
+
+    if not api_key:
         return None
 
     with _client_lock:

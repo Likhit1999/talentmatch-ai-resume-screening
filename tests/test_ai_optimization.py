@@ -159,3 +159,42 @@ def test_matching_service_caching_and_fast_execution():
     res2 = matching_service.match_candidate_to_jd(candidate_id=c_id, jd_id=jd_id, method="rule_based", force_rescreen=False)
     assert res2["id"] == res1["id"]
     assert res2["match_score"] == res1["match_score"]
+
+
+def test_clean_api_key_sanitization():
+    """Verify clean_api_key handles quotes, whitespace, and known placeholder strings."""
+    from config.settings import clean_api_key
+
+    # Normal key
+    assert clean_api_key("AIzaSy1234567890abcdef") == "AIzaSy1234567890abcdef"
+    # Strips whitespace
+    assert clean_api_key("  AIzaSy1234567890abcdef  \n") == "AIzaSy1234567890abcdef"
+    # Strips double quotes
+    assert clean_api_key('"AIzaSy1234567890abcdef"') == "AIzaSy1234567890abcdef"
+    # Strips single quotes
+    assert clean_api_key("'AIzaSy1234567890abcdef'") == "AIzaSy1234567890abcdef"
+
+    # Known dummy placeholders return empty string
+    assert clean_api_key("your_google_api_key_here") == ""
+    assert clean_api_key("your_api_key_here") == ""
+    assert clean_api_key("placeholder") == ""
+    assert clean_api_key("none") == ""
+    assert clean_api_key("") == ""
+    assert clean_api_key(None) == ""
+
+
+def test_get_api_key_ignores_placeholders(monkeypatch):
+    """Verify get_api_key ignores placeholder text and retrieves real keys."""
+    from config.settings import get_settings
+
+    settings = get_settings()
+
+    # When env has placeholder
+    monkeypatch.setenv("GEMINI_API_KEY", "your_google_api_key_here")
+    settings.GEMINI_API_KEY = "your_google_api_key_here"
+    assert settings.get_api_key() != "your_google_api_key_here"
+
+    # When env has real key with quotes
+    monkeypatch.setenv("GEMINI_API_KEY", '"AIzaSyValidTestKey123456"')
+    settings.GEMINI_API_KEY = '"AIzaSyValidTestKey123456"'
+    assert settings.get_api_key() == "AIzaSyValidTestKey123456"

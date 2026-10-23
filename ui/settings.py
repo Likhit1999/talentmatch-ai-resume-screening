@@ -152,16 +152,19 @@ def render_settings() -> None:
             test_conn_btn = st.button("⚡ Test AI Connection & Token Meter", use_container_width=True)
 
         if test_conn_btn:
-            key_to_test = new_api_key.strip() if new_api_key.strip() else cur_api_key
-            if not key_to_test or key_to_test.lower() in ("your_api_key_here", "none", "placeholder"):
-                st.error("No valid Gemini API key configured. Please enter an API key.")
+            from config.settings import clean_api_key
+            raw_test_key = new_api_key if new_api_key.strip() else cur_api_key
+            key_to_test = clean_api_key(raw_test_key)
+            if not key_to_test:
+                st.error("No valid Gemini API key found in Streamlit Secrets, environment, or input field. Please enter a valid API key.")
             else:
                 with st.spinner("Connecting to Google Gemini API (fast check)..."):
                     try:
                         reply = None
                         t_start = time.perf_counter()
-                        from services.ai_client import get_genai_client, record_token_usage
+                        from services.ai_client import get_genai_client, record_token_usage, reset_cached_client
                         from google.genai import types
+                        reset_cached_client()
                         client = get_genai_client(key_to_test)
                         if not client:
                             raise ValueError("Could not create GenAI client with provided key.")
@@ -186,6 +189,16 @@ def render_settings() -> None:
                         )
                     except Exception as conn_err:
                         st.error(f"✕ Connection failed: {conn_err}")
+                        if "API_KEY_INVALID" in str(conn_err) or "API key not valid" in str(conn_err) or "400" in str(conn_err):
+                            st.info(
+                                "💡 **How to configure your API key on Streamlit Community Cloud:**\n\n"
+                                "1. In Streamlit Cloud, go to your App Dashboard → **Settings (⋮)** → **Secrets**.\n"
+                                "2. Paste your Google AI Studio key as TOML:\n"
+                                "```toml\n"
+                                'GEMINI_API_KEY = "AIzaSy...your-actual-api-key"\n'
+                                "```\n"
+                                "3. Or paste it directly in the **Gemini API Key** field above and click **Save Configuration Changes**."
+                            )
 
         # -----------------------------------------------------------------
         # Real-Time Token & Quota Tracking Section
@@ -495,11 +508,14 @@ def render_settings() -> None:
                     from dotenv import set_key
                     set_key(str(env_file), "AI_MODEL", selected_model)
                     if new_api_key.strip():
-                        set_key(str(env_file), "GEMINI_API_KEY", new_api_key.strip())
+                        from config.settings import clean_api_key
+                        set_key(str(env_file), "GEMINI_API_KEY", clean_api_key(new_api_key))
                     set_key(str(env_file), "AI_ENABLED", str(ai_enabled_input).lower())
                 except Exception as env_sync_err:
                     logger.warning("Could not sync updated settings to .env: %s", env_sync_err)
 
+            from services.ai_client import reset_cached_client
+            reset_cached_client()
             st.success("✓ All configuration parameters persisted successfully to database and .env!")
             st.rerun()
         except Exception as save_err:
