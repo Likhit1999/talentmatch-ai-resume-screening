@@ -29,6 +29,7 @@ from services.candidate_service import CandidateService
 from services.jd_service import JDService
 from services.matching_service import MatchingService
 from services.scoring_service import ScoringService
+from services.whatsapp_service import WhatsAppService
 from ui.styles import get_custom_css
 
 logger = logging.getLogger(__name__)
@@ -845,7 +846,9 @@ def _render_match_detail(match_id: int, matching_service: MatchingService) -> No
         unsafe_allow_html=True,
     )
 
-    tab_eval, tab_strengths, tab_action = st.tabs(["📋 Requirement Evidence", "⭐ Strengths & Gaps", "✍️ Recruiter Review"])
+    tab_eval, tab_strengths, tab_action, tab_wa = st.tabs(
+        ["📋 Requirement Evidence", "⭐ Strengths & Gaps", "✍️ Recruiter Review", "💬 WhatsApp Outreach"]
+    )
 
     # TAB 1: EVIDENCE
     with tab_eval:
@@ -961,6 +964,116 @@ def _render_match_detail(match_id: int, matching_service: MatchingService) -> No
                 matching_service.rerun_matching(match_id)
                 st.success("Match re-evaluated!")
                 st.rerun()
+
+    # TAB 4: WHATSAPP OUTREACH
+    with tab_wa:
+        wa_srv = WhatsAppService()
+        st.markdown("##### 💬 WhatsApp Outreach to Candidate")
+
+        if not wa_srv.is_enabled():
+            st.info("ℹ️ WhatsApp outreach is currently disabled in configuration (WHATSAPP_ENABLED=false).")
+        else:
+            cand_p = detail.get("candidate_phone") or ""
+            if not cand_p.strip():
+                st.warning("⚠️ Candidate has no phone number on file. Please enter their phone number below to enable WhatsApp outreach.")
+
+            wa_col1, wa_col2 = st.columns([1, 1.4])
+            with wa_col1:
+                wa_num = st.text_input(
+                    "Candidate WhatsApp Number:",
+                    value=cand_p,
+                    placeholder="+91 9876543210 (with country code)",
+                    key=f"mr_wa_phone_{match_id}",
+                    help="Candidate's phone number. Standard 10-digit Indian numbers automatically use +91.",
+                )
+                recruiter_name = st.text_input(
+                    "Recruiter Sign-off:",
+                    value="Talent Acquisition Team",
+                    key=f"mr_wa_recruiter_{match_id}",
+                )
+                wa_templates = wa_srv.get_templates(
+                    candidate_name=cand_name,
+                    job_title=detail.get("jd_title") or "Target Position",
+                    recruiter_name=recruiter_name.strip() or "Talent Acquisition Team",
+                )
+                sel_wa_tpl = st.selectbox(
+                    "Outreach Template:",
+                    options=list(wa_templates.keys()),
+                    format_func=lambda k: wa_templates[k]["name"],
+                    key=f"mr_wa_tpl_{match_id}",
+                )
+            with wa_col2:
+                default_wa = wa_templates[sel_wa_tpl]["message"]
+
+                # Ensure switching templates immediately updates the text area in Streamlit
+                last_tpl_tracker = f"_last_wa_tpl_{match_id}"
+                last_recruiter_tracker = f"_last_wa_rec_{match_id}"
+                body_key = f"mr_wa_body_{match_id}"
+                clean_recruiter = recruiter_name.strip()
+
+                if (
+                    st.session_state.get(last_tpl_tracker) != sel_wa_tpl
+                    or st.session_state.get(last_recruiter_tracker) != clean_recruiter
+                ):
+                    st.session_state[body_key] = default_wa
+                    st.session_state[last_tpl_tracker] = sel_wa_tpl
+                    st.session_state[last_recruiter_tracker] = clean_recruiter
+
+                msg_text = st.text_area(
+                    "WhatsApp Message (Editable):",
+                    value=default_wa,
+                    height=150,
+                    key=body_key,
+                )
+
+                # Quick reset to default template text if needed
+                if st.button("↺ Reset Message to Template Default", key=f"mr_btn_reset_{match_id}", help="Revert edits back to standard template text"):
+                    st.session_state[body_key] = default_wa
+                    st.rerun()
+
+                redirect_info = wa_srv.generate_whatsapp_redirect(wa_num, msg_text)
+                wa_link = redirect_info.get("url")
+
+                # Preview bubble
+                st.markdown(
+                    f"""
+                    <div style="background-color: #f0fdf4; border: 1px solid #86efac; border-radius: 6px; padding: 0.6rem 0.8rem; margin-bottom: 0.6rem;">
+                        <div style="font-size: 0.78rem; color: #166534; font-weight: 700; margin-bottom: 0.2rem;">📱 WhatsApp Preview:</div>
+                        <div style="font-size: 0.82rem; color: #1e293b; white-space: pre-wrap; font-family: sans-serif; line-height: 1.4;">{msg_text}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+                if not redirect_info.get("success"):
+                    st.warning(f"⚠️ {redirect_info.get('error') or 'Please enter a valid phone number.'}")
+
+                wb1, wb2 = st.columns(2)
+                with wb1:
+                    if wa_link:
+                        st.link_button(
+                            "💬 Contact on WhatsApp",
+                            url=wa_link,
+                            type="primary",
+                            use_container_width=True,
+                            help="Opens WhatsApp Web or mobile app. Review the message and press Send manually.",
+                        )
+                    else:
+                        st.button(
+                            "💬 Contact on WhatsApp",
+                            disabled=True,
+                            key=f"mr_wa_dis_{match_id}",
+                            use_container_width=True,
+                            help="Provide a valid phone number to generate WhatsApp link",
+                        )
+                with wb2:
+                    if st.button("📝 Record Outreach Note", key=f"mr_wa_log_{match_id}", use_container_width=True):
+                        if not wa_link:
+                            st.error("Cannot record outreach: Invalid phone number.")
+                        else:
+                            now_str = datetime.now().strftime("%b %d, %H:%M")
+                            st.info(f"Outreach attempt noted on {now_str}. Please review and manually press Send in WhatsApp.")
+                st.caption("ℹ️ Generates a direct WhatsApp link. HR reviews the prefilled message and sends it manually.")
 
 
 def _render_candidate_comparison(match_ids: List[int], matching_service: MatchingService) -> None:

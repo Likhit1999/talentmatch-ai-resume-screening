@@ -7,7 +7,9 @@ recruiter email templates with multiple selectable sender mailboxes.
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import logging
+import os
 import smtplib
+import socket
 from typing import Any, Dict, List, Optional
 
 from config.settings import get_settings
@@ -78,6 +80,21 @@ Best regards,
         Returns:
             dict: Status result with 'success', 'message', and 'details'.
         """
+        # Dynamically reload .env to ensure fresh credentials if modified without restarting server
+        dotenv_path = self.settings.BASE_DIR / ".env"
+        if dotenv_path.exists():
+            from dotenv import load_dotenv
+            load_dotenv(dotenv_path=dotenv_path, override=True)
+            from config.settings import _str_to_bool
+            self.settings.SMTP_USER = os.getenv("SMTP_USER", self.settings.SMTP_USER).strip()
+            self.settings.SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", self.settings.SMTP_PASSWORD).strip()
+            self.settings.SMTP_HOST = os.getenv("SMTP_HOST", self.settings.SMTP_HOST).strip()
+            try:
+                self.settings.SMTP_PORT = int(os.getenv("SMTP_PORT", str(self.settings.SMTP_PORT)))
+            except ValueError:
+                pass
+            self.settings.SMTP_USE_TLS = _str_to_bool(os.getenv("SMTP_USE_TLS"), default=self.settings.SMTP_USE_TLS)
+
         sender = from_email or (self.settings.SENDER_EMAILS[0] if self.settings.SENDER_EMAILS else "hr@talentmatch.ai")
 
         if not to_email or "@" not in to_email:
@@ -109,20 +126,59 @@ Best regards,
 
             if self.settings.SMTP_PORT == 465:
                 server = smtplib.SMTP_SSL(self.settings.SMTP_HOST, self.settings.SMTP_PORT, timeout=15)
+                server.ehlo()
             else:
                 server = smtplib.SMTP(self.settings.SMTP_HOST, self.settings.SMTP_PORT, timeout=15)
+                server.ehlo()
                 if self.settings.SMTP_USE_TLS:
                     server.starttls()
+                    server.ehlo()
 
             server.login(self.settings.SMTP_USER, self.settings.SMTP_PASSWORD)
             server.sendmail(sender, [to_email], msg.as_string())
-            server.quit()
+            try:
+                server.quit()
+            except Exception:
+                pass
 
             logger.info("Email sent successfully to %s from %s", to_email, sender)
             return {
                 "success": True,
                 "simulated": False,
                 "message": f"Email delivered successfully to {to_email} from {sender}!",
+            }
+        except smtplib.SMTPAuthenticationError as auth_err:
+            logger.error("SMTP Authentication failed for %s: %s", self.settings.SMTP_USER, auth_err)
+            return {
+                "success": False,
+                "simulated": False,
+                "message": (
+                    f"SMTP Authentication Error (535 Bad Credentials): Username and password rejected by {self.settings.SMTP_HOST}. "
+                    "For Gmail / Google Workspace, regular account passwords do not work. You must enable 2-Step Verification "
+                    "and generate a 16-character App Password at https://myaccount.google.com/apppasswords."
+                ),
+            }
+        except smtplib.SMTPServerDisconnected as disc_err:
+            logger.error("SMTP Server disconnected: %s", disc_err)
+            return {
+                "success": False,
+                "simulated": False,
+                "message": (
+                    f"SMTP Error: Connection unexpectedly closed by {self.settings.SMTP_HOST}. "
+                    "When using Gmail / Google Workspace, Google automatically closes the connection upon receiving invalid "
+                    "credentials (535 Bad Credentials). Please verify that your SMTP_USER is correct and generate a new "
+                    "16-character Google App Password at https://myaccount.google.com/apppasswords."
+                ),
+            }
+        except (smtplib.SMTPConnectError, TimeoutError, socket.timeout, ConnectionRefusedError) as conn_err:
+            logger.error("SMTP Connection failed: %s", conn_err)
+            return {
+                "success": False,
+                "simulated": False,
+                "message": (
+                    f"SMTP Connection Error: Could not connect to {self.settings.SMTP_HOST}:{self.settings.SMTP_PORT}. "
+                    "Please verify your network connection, firewall settings, and port configuration."
+                ),
             }
         except Exception as exc:
             logger.error("Failed to send email to %s: %s", to_email, exc, exc_info=True)

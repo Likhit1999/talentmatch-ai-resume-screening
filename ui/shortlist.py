@@ -14,6 +14,7 @@ from services.candidate_service import CandidateService
 from services.email_service import EmailService
 from services.jd_service import JDService
 from services.shortlist_service import ShortlistService
+from services.whatsapp_service import WhatsAppService
 
 STATUS_COLORS = {
     "shortlisted": ("#DCFCE7", "#15803D"),
@@ -51,6 +52,7 @@ def render_shortlist() -> None:
     jd_service = JDService()
     candidate_service = CandidateService()
     email_service = EmailService()
+    whatsapp_service = WhatsAppService()
 
     # Automatically sync any matches that were marked as shortlisted in review
     shortlist_service.sync_unassigned_shortlisted_matches()
@@ -433,51 +435,177 @@ def render_shortlist() -> None:
                             st.rerun()
 
             with act_col2:
-                st.markdown(f"##### ✉️ Candidate Details & Outreach Email: **{cand['candidate_name']}**")
-                tpl = email_service.generate_candidate_inquiry_template(
-                    candidate_name=cand["candidate_name"],
-                    job_title=shortlist_data["jd_title"],
-                )
+                st.markdown(f"##### 📢 Candidate Outreach Hub: **{cand['candidate_name']}**")
+                tab_wa, tab_email = st.tabs(["💬 WhatsApp Outreach", "✉️ Email Outreach"])
 
-                from_email_choice = st.selectbox(
-                    "From Mailbox:",
-                    options=available_senders,
-                    key=f"em_sender_tbl_{cand['candidate_id']}",
-                    help="Select sender address configured in SENDER_EMAILS in .env",
-                )
-                to_email_input = st.text_input(
-                    "To Candidate:",
-                    value=cand["email"] or "",
-                    placeholder="candidate@example.com",
-                    key=f"em_to_tbl_{cand['candidate_id']}",
-                )
-                em_subject = st.text_input(
-                    "Subject:",
-                    value=tpl["subject"],
-                    key=f"em_sub_tbl_{cand['candidate_id']}",
-                )
-                em_body = st.text_area(
-                    "Message Body:",
-                    value=tpl["body"],
-                    height=240,
-                    key=f"em_body_tbl_{cand['candidate_id']}",
-                )
-
-                if st.button("🚀 Send Outreach Email", key=f"em_send_btn_tbl_{cand['candidate_id']}", type="primary"):
-                    if not to_email_input.strip():
-                        st.error("Please provide a valid recipient email address.")
+                # ---------------------------------------------------------
+                # TAB 1: WHATSAPP OUTREACH
+                # ---------------------------------------------------------
+                with tab_wa:
+                    if not whatsapp_service.is_enabled():
+                        st.info("ℹ️ WhatsApp outreach is currently disabled in configuration (WHATSAPP_ENABLED=false).")
                     else:
-                        with st.spinner("Dispatching outreach email..."):
-                            send_res = email_service.send_email(
-                                to_email=to_email_input.strip(),
-                                subject=em_subject.strip(),
-                                body=em_body,
-                                from_email=from_email_choice,
-                            )
-                        if send_res.get("success"):
-                            st.success(send_res.get("message"))
+                        raw_cand_phone = cand.get("phone") or ""
+                        if not raw_cand_phone.strip():
+                            st.warning("⚠️ Candidate has no phone number on file. Please enter their phone number below to enable WhatsApp outreach.")
+
+                        wa_phone_input = st.text_input(
+                            "Candidate WhatsApp Number:",
+                            value=raw_cand_phone,
+                            placeholder="+91 9876543210 (include country code)",
+                            key=f"wa_phone_tbl_{cand['candidate_id']}",
+                            help="Candidate's phone number. Standard 10-digit Indian numbers automatically use +91.",
+                        )
+
+                        wa_recruiter_name = st.text_input(
+                            "Your Name / Sign-off:",
+                            value="Talent Acquisition Team",
+                            key=f"wa_recruiter_tbl_{cand['candidate_id']}",
+                        )
+
+                        wa_templates = whatsapp_service.get_templates(
+                            candidate_name=cand["candidate_name"],
+                            job_title=shortlist_data.get("jd_title", "Target Role"),
+                            recruiter_name=wa_recruiter_name.strip() or "Talent Acquisition Team",
+                        )
+
+                        wa_tpl_key = st.selectbox(
+                            "Select Message Template:",
+                            options=list(wa_templates.keys()),
+                            format_func=lambda k: wa_templates[k]["name"],
+                            key=f"wa_tpl_sel_{cand['candidate_id']}",
+                        )
+
+                        default_wa_body = wa_templates[wa_tpl_key]["message"]
+
+                        # Ensure switching templates immediately updates the text area in Streamlit
+                        last_tpl_tracker = f"_last_wa_tpl_{cand['candidate_id']}"
+                        last_recruiter_tracker = f"_last_wa_rec_{cand['candidate_id']}"
+                        body_key = f"wa_body_tbl_{cand['candidate_id']}"
+                        clean_recruiter = wa_recruiter_name.strip()
+
+                        if (
+                            st.session_state.get(last_tpl_tracker) != wa_tpl_key
+                            or st.session_state.get(last_recruiter_tracker) != clean_recruiter
+                        ):
+                            st.session_state[body_key] = default_wa_body
+                            st.session_state[last_tpl_tracker] = wa_tpl_key
+                            st.session_state[last_recruiter_tracker] = clean_recruiter
+
+                        wa_body = st.text_area(
+                            "WhatsApp Message Body (supports *bold*, _italic_):",
+                            value=default_wa_body,
+                            height=180,
+                            key=body_key,
+                        )
+
+                        # Quick reset to default template text if needed
+                        if st.button("↺ Reset Message to Template Default", key=f"btn_reset_wa_{cand['candidate_id']}", help="Revert edits back to standard template text"):
+                            st.session_state[body_key] = default_wa_body
+                            st.rerun()
+
+                        redirect_info = whatsapp_service.generate_whatsapp_redirect(wa_phone_input, wa_body)
+                        wa_link = redirect_info.get("url")
+
+                        # Preview bubble
+                        st.markdown(
+                            f"""
+                            <div style="background-color: #f0fdf4; border: 1px solid #86efac; border-radius: 6px; padding: 0.65rem 0.85rem; margin-bottom: 0.75rem;">
+                                <div style="font-size: 0.78rem; color: #166534; font-weight: 700; margin-bottom: 0.2rem;">📱 WhatsApp Message Preview:</div>
+                                <div style="font-size: 0.82rem; color: #1e293b; white-space: pre-wrap; font-family: sans-serif; line-height: 1.4;">{wa_body}</div>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                        if not redirect_info.get("success"):
+                            st.warning(f"⚠️ {redirect_info.get('error') or 'Please provide a valid phone number.'}")
+
+                        wa_c1, wa_c2 = st.columns([1.3, 1])
+                        with wa_c1:
+                            if wa_link:
+                                st.link_button(
+                                    "💬 Contact on WhatsApp",
+                                    url=wa_link,
+                                    type="primary",
+                                    use_container_width=True,
+                                    help="Opens WhatsApp Web or mobile app. Review the prefilled message and press Send manually.",
+                                )
+                            else:
+                                st.button(
+                                    "💬 Contact on WhatsApp",
+                                    disabled=True,
+                                    key=f"wa_dis_btn_{cand['candidate_id']}",
+                                    use_container_width=True,
+                                    help="Provide valid phone number with country code",
+                                )
+
+                        with wa_c2:
+                            if st.button("📝 Record Outreach Note", key=f"wa_send_btn_{cand['candidate_id']}", type="secondary", use_container_width=True):
+                                if not wa_link:
+                                    st.error("Cannot record outreach: Invalid phone number.")
+                                else:
+                                    now_str = datetime.now().strftime("%b %d, %H:%M")
+                                    existing_notes = cand.get("recruiter_notes") or ""
+                                    update_note = f"[WhatsApp Outreach on {now_str}]: Opened WhatsApp to contact candidate regarding {shortlist_data.get('jd_title', 'position')} (Manual send pending in WhatsApp)"
+                                    combined_notes = f"{existing_notes}\n{update_note}".strip() if existing_notes else update_note
+                                    shortlist_service.update_candidate_status(
+                                        shortlist_id=current_shortlist_id,
+                                        candidate_id=cand["candidate_id"],
+                                        notes=combined_notes,
+                                    )
+                                    st.info(f"Outreach attempt noted in candidate pipeline records. Please review and send in WhatsApp.")
+
+                        st.caption("ℹ️ Generates a direct WhatsApp link. HR reviews the prefilled message and sends it manually.")
+
+                # ---------------------------------------------------------
+                # TAB 2: EMAIL OUTREACH
+                # ---------------------------------------------------------
+                with tab_email:
+                    tpl = email_service.generate_candidate_inquiry_template(
+                        candidate_name=cand["candidate_name"],
+                        job_title=shortlist_data["jd_title"],
+                    )
+
+                    from_email_choice = st.selectbox(
+                        "From Mailbox:",
+                        options=available_senders,
+                        key=f"em_sender_tbl_{cand['candidate_id']}",
+                        help="Select sender address configured in SENDER_EMAILS in .env",
+                    )
+                    to_email_input = st.text_input(
+                        "To Candidate:",
+                        value=cand["email"] or "",
+                        placeholder="candidate@example.com",
+                        key=f"em_to_tbl_{cand['candidate_id']}",
+                    )
+                    em_subject = st.text_input(
+                        "Subject:",
+                        value=tpl["subject"],
+                        key=f"em_sub_tbl_{cand['candidate_id']}",
+                    )
+                    em_body = st.text_area(
+                        "Message Body:",
+                        value=tpl["body"],
+                        height=200,
+                        key=f"em_body_tbl_{cand['candidate_id']}",
+                    )
+
+                    if st.button("🚀 Send Outreach Email", key=f"em_send_btn_tbl_{cand['candidate_id']}", type="primary"):
+                        if not to_email_input.strip():
+                            st.error("Please provide a valid recipient email address.")
                         else:
-                            st.error(send_res.get("message"))
+                            with st.spinner("Dispatching outreach email..."):
+                                send_res = email_service.send_email(
+                                    to_email=to_email_input.strip(),
+                                    subject=em_subject.strip(),
+                                    body=em_body,
+                                    from_email=from_email_choice,
+                                )
+                            if send_res.get("success"):
+                                st.success(send_res.get("message"))
+                            else:
+                                st.error(send_res.get("message"))
 
     # =========================================================================
 

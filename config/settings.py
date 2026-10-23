@@ -16,16 +16,33 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # Load .env file from base directory if present; fall back to .env.example
 if (BASE_DIR / ".env").exists():
-    load_dotenv(dotenv_path=BASE_DIR / ".env", override=True)
+    load_dotenv(dotenv_path=BASE_DIR / ".env", override=False)
 elif (BASE_DIR / ".env.example").exists():
-    load_dotenv(dotenv_path=BASE_DIR / ".env.example", override=True)
+    load_dotenv(dotenv_path=BASE_DIR / ".env.example", override=False)
+
+
+def _get_env_or_secret(key: str, default: str = "") -> str:
+    """Read configuration from Streamlit Cloud secrets or environment variables."""
+    try:
+        import streamlit as st
+
+        if hasattr(st, "secrets") and key in st.secrets:
+            val = st.secrets[key]
+            if val is not None:
+                return str(val).strip()
+    except Exception:
+        pass
+    val = os.getenv(key)
+    if val is not None:
+        return str(val).strip()
+    return default
 
 
 def _str_to_bool(value: Optional[str], default: bool = False) -> bool:
     """Helper to convert string representations of booleans to bool."""
     if value is None:
         return default
-    return value.strip().lower() in ("true", "1", "yes", "on", "t")
+    return str(value).strip().lower() in ("true", "1", "yes", "on", "t")
 
 
 class Settings:
@@ -75,6 +92,16 @@ class Settings:
         if not senders_list:
             senders_list = ["hr@talentmatch.ai", "careers@talentmatch.ai", "recruiting@talentmatch.ai"]
         self.SENDER_EMAILS: list[str] = senders_list
+
+        # WhatsApp Outreach Settings
+        self.WHATSAPP_ENABLED: bool = _str_to_bool(_get_env_or_secret("WHATSAPP_ENABLED", "true"), default=True)
+        self.WHATSAPP_PROVIDER: str = _get_env_or_secret("WHATSAPP_PROVIDER", "web_direct").strip().lower()
+        self.DEFAULT_COUNTRY_CODE: str = _get_env_or_secret("DEFAULT_COUNTRY_CODE", "+91").strip()
+        self.TWILIO_ACCOUNT_SID: str = _get_env_or_secret("TWILIO_ACCOUNT_SID", "").strip()
+        self.TWILIO_AUTH_TOKEN: str = _get_env_or_secret("TWILIO_AUTH_TOKEN", "").strip()
+        self.TWILIO_WHATSAPP_NUMBER: str = _get_env_or_secret("TWILIO_WHATSAPP_NUMBER", "").strip()
+        self.META_WHATSAPP_TOKEN: str = _get_env_or_secret("META_WHATSAPP_TOKEN", "").strip()
+        self.META_PHONE_NUMBER_ID: str = _get_env_or_secret("META_PHONE_NUMBER_ID", "").strip()
 
         # Ensure essential directories exist
         self.LOGS_DIR.mkdir(parents=True, exist_ok=True)
