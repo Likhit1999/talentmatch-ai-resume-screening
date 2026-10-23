@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
+MONTH_MAP: Dict[str, int] = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
 # Default scoring weights (percentages summing to 100.0)
 DEFAULT_SCORING_WEIGHTS: Dict[str, float] = {
     "mandatory_skills": 50.0,
@@ -271,6 +276,139 @@ class ScoringService:
 
         return (100.0, f"Candidate has ~{years:.1f} years of experience.")
 
+    @staticmethod
+    def _parse_date_token(token: str) -> Optional[float]:
+        """Convert a date token (e.g. 'Aug 2024', '2024', 'Present') to a float year."""
+        t = token.strip().lower()
+        now = datetime.now()
+        if t in ("present", "current", "now", "ongoing"):
+            return float(now.year) + (now.month - 1) / 12.0
+
+        m_month_yr = re.search(r"([a-z]{3})[a-z]*\.?\s*(\d{4})", t)
+        if m_month_yr:
+            mon = MONTH_MAP.get(m_month_yr.group(1), 1)
+            yr = int(m_month_yr.group(2))
+            return yr + (mon - 1) / 12.0
+
+        m_yr = re.search(r"\b(19\d{2}|20\d{2})\b", t)
+        if m_yr:
+            return float(m_yr.group(1))
+        return None
+
+    @classmethod
+    def _parse_duration_interval(cls, duration_str: str) -> Optional[Tuple[float, float]]:
+        """Parse start and end year floats from duration text (e.g. 'Jan 2018 - Present')."""
+        if not duration_str:
+            return None
+
+        pattern = re.compile(
+            r"(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(\b(?:19|20)\d{2}\b)\s*(?:-|–|—|to)\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(\b(?:19|20)\d{2}\b|present|current|now|ongoing)",
+            re.IGNORECASE,
+        )
+        match = pattern.search(duration_str)
+        if match:
+            full_match = match.group(0)
+            parts = re.split(r"[-–—]|to", full_match, maxsplit=1)
+            if len(parts) == 2:
+                s = cls._parse_date_token(parts[0])
+                e = cls._parse_date_token(parts[1])
+                if s is not None and e is not None and e >= s:
+                    return (s, e)
+        return None
+
+    @classmethod
+    def _extract_intervals_from_text(cls, text: str) -> List[Tuple[float, float]]:
+        """Scan freeform text for non-education employment date intervals."""
+        if not text:
+            return []
+        pattern = re.compile(
+            r"(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?\b(?:19|20)\d{2}\b\s*(?:-|–|—|to)\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(?:\b(?:19|20)\d{2}\b|present|current|now|ongoing)",
+            re.IGNORECASE,
+        )
+        intervals: List[Tuple[float, float]] = []
+        edu_indicators = [
+            "university", "college", "polytechnic", "bachelor", "b.e", "b.tech",
+            "diploma", "cgpa", "degree", "master", "m.tech", "phd", "graduat",
+        ]
+        for m in pattern.finditer(text):
+            start_pos = max(0, m.start() - 100)
+            end_pos = min(len(text), m.end() + 100)
+            surrounding = text[start_pos:end_pos].lower()
+            if any(k in surrounding for k in edu_indicators):
+                continue
+            parts = re.split(r"[-–—]|to", m.group(0), maxsplit=1)
+            if len(parts) == 2:
+                s = cls._parse_date_token(parts[0])
+                e = cls._parse_date_token(parts[1])
+                if s is not None and e is not None and e >= s:
+                    intervals.append((s, e))
+        return intervals
+
+    @staticmethod
+    def _extract_explicit_experience_years(text: str) -> float:
+        """Extract declared total years of experience from resume text and summaries."""
+        if not text:
+            return 0.0
+        explicit_vals: List[float] = []
+
+        # Pattern 1: 'X+ years of ... experience'
+        p1 = re.finditer(
+            r"\b(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)(?:\s+of)?(?:\s+(?:[a-zA-Z/&.-]+\s+){0,6})?experience\b",
+            text,
+            re.IGNORECASE,
+        )
+        for m in p1:
+            try:
+                v = float(m.group(1))
+                if 0.5 <= v <= 45:
+                    explicit_vals.append(v)
+            except ValueError:
+                pass
+
+        # Pattern 2: 'Total Experience: X years' or 'Experience: X years'
+        p2 = re.finditer(
+            r"\b(?:total\s+)?experience\s*[:\-–]\s*(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)",
+            text,
+            re.IGNORECASE,
+        )
+        for m in p2:
+            try:
+                v = float(m.group(1))
+                if 0.5 <= v <= 45:
+                    explicit_vals.append(v)
+            except ValueError:
+                pass
+
+        # Pattern 3: 'X+ years QA/developer/engineer/etc.'
+        p3 = re.finditer(
+            r"\b(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\s+(?:qa|lead|developer|engineer|software|sdet|it|testing|design|devops|data|consultant|frontend|backend|fullstack|full-stack)\b",
+            text,
+            re.IGNORECASE,
+        )
+        for m in p3:
+            try:
+                v = float(m.group(1))
+                if 0.5 <= v <= 45:
+                    explicit_vals.append(v)
+            except ValueError:
+                pass
+
+        # Pattern 4: 'over X years of experience'
+        p4 = re.finditer(
+            r"\b(?:over|more\s+than)\s+(\d+(?:\.\d+)?)\s*(?:\+)?\s*(?:years?|yrs?)",
+            text,
+            re.IGNORECASE,
+        )
+        for m in p4:
+            try:
+                v = float(m.group(1))
+                if 0.5 <= v <= 45:
+                    explicit_vals.append(v)
+            except ValueError:
+                pass
+
+        return max(explicit_vals) if explicit_vals else 0.0
+
     def _extract_total_experience_years(
         self, candidate_experience: Any, resume_text: str = ""
     ) -> float:
@@ -278,21 +416,30 @@ class ScoringService:
         if isinstance(candidate_experience, (int, float)):
             return float(candidate_experience)
 
-        total_years = 0.0
+        structured_years = 0.0
+        parsed_intervals: List[Tuple[float, float]] = []
 
-        # If candidate_experience is a list of role entries
         if isinstance(candidate_experience, list) and candidate_experience:
-            parsed_intervals: List[Tuple[float, float]] = []
             for item in candidate_experience:
-                if isinstance(item, dict):
-                    duration_str = item.get("duration", "") or ""
-                    title = item.get("title", "") or ""
-                    desc = item.get("description", "") or ""
+                if isinstance(item, (int, float)):
+                    structured_years += float(item)
+                elif isinstance(item, dict):
+                    # Check for explicit year fields
+                    for yk in ("years", "experience_years", "total_years"):
+                        if item.get(yk) is not None:
+                            try:
+                                structured_years += float(item[yk])
+                                break
+                            except (ValueError, TypeError):
+                                pass
+
+                    duration_str = str(
+                        item.get("duration", "") or item.get("period", "") or item.get("dates", "") or ""
+                    )
                     interval = self._parse_duration_interval(duration_str)
                     if interval:
                         parsed_intervals.append(interval)
                     else:
-                        # Try parsing years directly from duration string like "3 years"
                         years_match = re.search(
                             r"(\d+(?:\.\d+)?)\s*(?:\+)?\s*(?:years?|yrs?)",
                             duration_str,
@@ -300,55 +447,37 @@ class ScoringService:
                         )
                         if years_match:
                             try:
-                                total_years += float(years_match.group(1))
+                                structured_years += float(years_match.group(1))
+                            except ValueError:
+                                pass
+                        months_match = re.search(
+                            r"(\d+(?:\.\d+)?)\s*(?:months?|mos?)",
+                            duration_str,
+                            re.IGNORECASE,
+                        )
+                        if months_match:
+                            try:
+                                structured_years += round(float(months_match.group(1)) / 12.0, 1)
                             except ValueError:
                                 pass
 
-            if parsed_intervals:
-                # Merge overlapping intervals or sum up distinct work periods
-                total_years = max(total_years, self._compute_span_from_intervals(parsed_intervals))
-            elif total_years == 0.0 and len(candidate_experience) > 0:
-                # Fallback: estimate 1.5 years per distinct job role listed
-                total_years = round(len(candidate_experience) * 1.5, 1)
+        if parsed_intervals:
+            structured_span = self._compute_span_from_intervals(parsed_intervals)
+            structured_years = max(structured_years, structured_span)
 
-        # Fallback to scanning resume summary or resume text if 0.0
-        if total_years <= 0.0 and resume_text:
-            text_match = re.search(
-                r"\b(\d+(?:\.\d+)?)\s*(?:\+)?\s*(?:years?|yrs?)(?:\s+of)?(?:\s+(?:professional|relevant|total|industry))?\s+experience\b",
-                resume_text,
-                re.IGNORECASE,
-            )
-            if text_match:
-                try:
-                    total_years = float(text_match.group(1))
-                except ValueError:
-                    pass
+        # 2. Extract employment date intervals directly from resume text
+        text_intervals = self._extract_intervals_from_text(resume_text)
+        text_span = self._compute_span_from_intervals(text_intervals) if text_intervals else 0.0
 
-        return round(max(0.0, total_years), 1)
+        # 3. Extract explicit experience declarations from resume text
+        explicit_years = self._extract_explicit_experience_years(resume_text)
 
-    @staticmethod
-    def _parse_duration_interval(duration_str: str) -> Optional[Tuple[float, float]]:
-        """Parse start and end year floats from duration text (e.g. 'Jan 2018 - Present')."""
-        if not duration_str:
-            return None
+        # Take the maximum substantiated experience value
+        total = max(structured_years, text_span, explicit_years)
+        if total <= 0.0 and isinstance(candidate_experience, list) and candidate_experience:
+            total = round(len(candidate_experience) * 1.5, 1)
 
-        # Look for 4-digit years
-        current_year = datetime.now().year
-        pattern = re.compile(
-            r"(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(\b(?:19|20)\d{2}\b)\s*(?:-|–|—|to)\s*(?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*)?(\b(?:19|20)\d{2}\b|present|current|now)",
-            re.IGNORECASE,
-        )
-        match = pattern.search(duration_str)
-        if match:
-            try:
-                start_yr = float(match.group(1))
-                end_token = match.group(2).lower()
-                end_yr = float(current_year) if end_token in ("present", "current", "now") else float(end_token)
-                if end_yr >= start_yr:
-                    return (start_yr, end_yr)
-            except (ValueError, TypeError):
-                pass
-        return None
+        return round(max(0.0, total), 1)
 
     @staticmethod
     def _compute_span_from_intervals(intervals: List[Tuple[float, float]]) -> float:
@@ -364,7 +493,7 @@ class ScoringService:
             else:
                 merged.append((start, end))
 
-        total = sum(max(0.5, end - start) for start, end in merged)
+        total = sum(max(0.2, end - start) for start, end in merged)
         return round(total, 1)
 
     def calculate_qualification_score(

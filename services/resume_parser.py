@@ -617,11 +617,15 @@ class ResumeParserService:
         # 3. Skills Extraction
         skills = self._extract_skills(cleaned_text, sections.get("skills", ""))
 
-        # 4. Work Experience
-        experience = self._extract_experience(sections.get("experience", ""))
+        # 4. Work Experience & Education (with section disentanglement for multi-column resumes)
+        raw_edu = sections.get("education", "")
+        raw_exp = sections.get("experience", "")
+        clean_edu, misplaced_exp = self._separate_education_and_experience(raw_edu)
+        if misplaced_exp:
+            raw_exp = f"{raw_exp}\n\n{misplaced_exp}" if raw_exp else misplaced_exp
 
-        # 5. Education
-        education = self._extract_education(sections.get("education", ""))
+        experience = self._extract_experience(raw_exp)
+        education = self._extract_education(clean_edu)
 
         # 6. Certifications
         certifications = self._extract_certifications(sections.get("certifications", ""))
@@ -771,14 +775,99 @@ class ResumeParserService:
         # Sort alphabetically
         return sorted(list(found_skills), key=lambda s: s.lower())
 
+    def _separate_education_and_experience(self, edu_text: str) -> Tuple[str, str]:
+        """Separate academic education lines from misplaced work experience lines."""
+        if not edu_text or not edu_text.strip():
+            return "", ""
+
+        lines = edu_text.splitlines()
+        clean_edu: List[str] = []
+        misplaced_exp: List[str] = []
+        is_in_work_exp = False
+
+        job_title_pattern = re.compile(
+            r"\b(?:engineer|developer|tester|lead|manager|sdet|architect|analyst|specialist|consultant|officer)\b",
+            re.IGNORECASE,
+        )
+
+        for line in lines:
+            line_str = line.strip()
+            if not is_in_work_exp:
+                has_degree = any(p.search(line_str) for p in self.DEGREE_PATTERNS)
+                if (
+                    not has_degree
+                    and job_title_pattern.search(line_str)
+                    and not any(
+                        k in line_str.lower()
+                        for k in ["degree", "diploma", "university", "college", "school", "polytechnic"]
+                    )
+                ):
+                    is_in_work_exp = True
+            if is_in_work_exp:
+                misplaced_exp.append(line_str)
+            else:
+                clean_edu.append(line_str)
+
+        return "\n".join(clean_edu).strip(), "\n".join(misplaced_exp).strip()
+
+    @staticmethod
+    def _is_likely_title_or_company(line: str) -> bool:
+        """Check if line looks like a job title or employer rather than a bullet point or description."""
+        line_s = line.strip()
+        if not line_s or len(line_s) > 85:
+            return False
+        if line_s.endswith("."):
+            return False
+        if line_s.startswith(("-", "*", "•", "–", "—", "▪", "▸")):
+            return False
+        action_verbs = (
+            "led ", "managed ", "developed ", "built ", "designed ", "diagnosed ",
+            "reduced ", "executed ", "supported ", "worked ", "responsible ", "assisted ",
+            "created ", "maintained ", "collaborated ", "implemented ", "tested ",
+        )
+        if line_s.lower().startswith(action_verbs):
+            return False
+        return True
+
     def _extract_experience(self, exp_text: str) -> List[Dict[str, str]]:
         """Parse work history entries from experience section."""
         if not exp_text.strip():
             return []
 
-        entries: List[Dict[str, str]] = []
-        blocks = [b.strip() for b in re.split(r"\n\s*\n", exp_text) if b.strip()]
+        # Split into blocks: first try \n\s*\n, and if that results in blocks containing multiple date ranges,
+        # split further based on date / role boundaries
+        raw_blocks = [b.strip() for b in re.split(r"\n\s*\n", exp_text) if b.strip()]
+        blocks: List[str] = []
 
+        for b in raw_blocks:
+            lines = [l.strip() for l in b.split("\n") if l.strip()]
+            date_indices = [i for i, l in enumerate(lines) if self.DURATION_PATTERN.search(l)]
+            if len(date_indices) <= 1:
+                blocks.append(b)
+            else:
+                entry_starts = []
+                for i, d_idx in enumerate(date_indices):
+                    if i == 0:
+                        s = d_idx
+                        while s > 0 and self._is_likely_title_or_company(lines[s - 1]):
+                            s -= 1
+                        entry_starts.append(s)
+                    else:
+                        prev_d = date_indices[i - 1]
+                        s = d_idx
+                        while s > prev_d + 1 and (d_idx - s) < 2 and self._is_likely_title_or_company(lines[s - 1]):
+                            s -= 1
+                        if s == d_idx and d_idx > prev_d + 1:
+                            s = d_idx - 1
+                        entry_starts.append(s)
+
+                for i, s_idx in enumerate(entry_starts):
+                    e_idx = entry_starts[i + 1] if i + 1 < len(entry_starts) else len(lines)
+                    sub_b = "\n".join(lines[s_idx:e_idx]).strip()
+                    if sub_b:
+                        blocks.append(sub_b)
+
+        entries: List[Dict[str, str]] = []
         for block in blocks:
             lines = [l.strip() for l in block.split("\n") if l.strip()]
             if not lines:
@@ -825,7 +914,7 @@ class ResumeParserService:
                     "description": description[:500] if description else "",
                 })
 
-        return entries[:10]  # Return at most 10 relevant entries
+        return entries[:15]  # Return up to 15 relevant entries
 
     def _extract_education(self, edu_text: str) -> List[Dict[str, str]]:
         """Parse academic degrees, institutions, and graduation years."""

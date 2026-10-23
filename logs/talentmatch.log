@@ -54,3 +54,6 @@
 2026-10-21 11:53:56 | INFO     | talentmatch | app.py:286 | Application bootstrap complete: database ready.
 2026-10-21 12:09:50 | INFO     | talentmatch | app.py:286 | Application bootstrap complete: database ready.
 2026-10-21 12:10:44 | INFO     | talentmatch.ai_client | ai_client.py:75 | Initialized high-speed GenAI client singleton.
+2026-10-23 09:42:23 | INFO     | talentmatch | app.py:286 | Application bootstrap complete: database ready.
+2026-10-23 11:35:56 | INFO     | talentmatch | app.py:286 | Application bootstrap complete: database ready.
+2026-10-23 11:38:28 | INFO     | talentmatch.ai_client | ai_client.py:75 | Initialized high-speed GenAI client singleton.
